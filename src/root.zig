@@ -7,23 +7,27 @@ pub const EastAsianWidth = @import("tables/EastAsianWidth.zig");
 pub const VariationSelector16 = @import("tables/VariationSelector16.zig");
 
 pub fn utf8CodepointWidth(codepoint: u21, version: UnicodeVersion) !u3 {
-    if (codepoint >= 0x20 and codepoint < 0x7F) {
-        return 1;
-    }
-
-    if ((codepoint != 0 and codepoint < 0x20) or (codepoint >= 0x7F and codepoint < 0x0A0)) {
-        return error.InvalidControlCharacterWidth;
-    }
-
-    if (ZeroWidth.init(version).contains(codepoint)) {
-        return 0;
-    }
-
-    if (EastAsianWidth.init(version).contains(codepoint)) {
-        return 2;
-    } else {
-        return 1;
-    }
+    return switch (codepoint) {
+        // ASCII
+        0x20...0x7e => 1,
+        // C0 Control
+        0x01...0x1f => error.C0ControlInvalidWidth,
+        // C1 Control
+        0x7f...0x09f => error.C1ControlInvalidWidth,
+        // Surrogates range
+        0xd800...0xdfff => error.InvalidCodepoint,
+        // Above the maximum codepoint value
+        0x110000...0x1fffff => error.InvalidCodepoint,
+        else => blk: {
+            if (ZeroWidth.init(version).contains(codepoint)) {
+                break :blk 0;
+            } else if (EastAsianWidth.init(version).contains(codepoint)) {
+                break :blk 2;
+            } else {
+                break :blk 1;
+            }
+        },
+    };
 }
 
 pub fn utf8SliceWidth(bytes: []const u8, version: UnicodeVersion) !usize {
@@ -32,12 +36,16 @@ pub fn utf8SliceWidth(bytes: []const u8, version: UnicodeVersion) !usize {
     var width: usize = 0;
     var prev_codepoint: ?u21 = null;
     while (utf8.nextCodepoint()) |codepoint| {
-        if (codepoint == 0x200D) {
+        // zero width joiner, skip this and next codepoint
+        if (codepoint == 0x200d) {
             _ = utf8.nextCodepoint();
             continue;
         }
 
-        if (codepoint == 0xFE0F and prev_codepoint != null) {
+        // on variation selector 16 (VS16) following another codepoint,
+        // conditionally add '1' to the measured width if that character is
+        // known to be converted from narrow to wide by the VS16 codepoint.
+        if (codepoint == 0xfe0f and prev_codepoint != null) {
             if (VariationSelector16.init(version).contains(prev_codepoint.?)) {
                 width += 1;
             }
@@ -104,11 +112,23 @@ test "control_c0_width_error" {
     const utf8_view = try unicode.Utf8View.init(bytes);
     var utf8 = utf8_view.iterator();
 
-    try expectError(error.InvalidControlCharacterWidth, utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0"));
+    try expectError(error.C0ControlInvalidWidth, utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0"));
     try expect(try utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0") == 1);
     try expect(try utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0") == 1);
     try expect(try utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0") == 1);
-    try expectError(error.InvalidControlCharacterWidth, utf8SliceWidth(bytes, .@"15.1.0"));
+    try expectError(error.C0ControlInvalidWidth, utf8SliceWidth(bytes, .@"15.1.0"));
+}
+
+test "control_c1_width_error" {
+    const bytes: []const u8 = std.fmt.comptimePrint("{u}asd", .{0x84});
+    const utf8_view = try unicode.Utf8View.init(bytes);
+    var utf8 = utf8_view.iterator();
+
+    try expectError(error.C1ControlInvalidWidth, utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0"));
+    try expect(try utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0") == 1);
+    try expect(try utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0") == 1);
+    try expect(try utf8CodepointWidth(utf8.nextCodepoint().?, .@"15.1.0") == 1);
+    try expectError(error.C1ControlInvalidWidth, utf8SliceWidth(bytes, .@"15.1.0"));
 }
 
 test "conbining_width" {
